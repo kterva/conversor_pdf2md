@@ -105,6 +105,10 @@ class PDFToMarkdownConverter:
                     image_path=image_output_dir,
                     image_format="png"
                 )
+                # Reemplazar rutas absolutas por relativas para visibilidad en Obsidian/MarkText
+                abs_dir = os.path.abspath(image_output_dir)
+                rel_dir = os.path.basename(abs_dir)
+                md_text = md_text.replace(f"({abs_dir}/", f"({rel_dir}/")
             except Exception:
                 md_text = pymupdf4llm.to_markdown(file_path)
         else:
