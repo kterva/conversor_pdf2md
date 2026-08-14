@@ -131,6 +131,14 @@ class PDFToMarkdownConverter:
 
         final_text = '\n'.join(cleaned_md_text)
         
+        # Mover las imágenes al final del documento
+        if extract_images and image_output_dir:
+            image_tags = re.findall(r'!\[.*?\]\(.*?\)', final_text)
+            if image_tags:
+                # Eliminar las imágenes del texto principal
+                final_text = re.sub(r'!\[.*?\]\(.*?\)\n*', '', final_text)
+                final_text += '\n\n### Imágenes del Documento\n\n' + '\n\n'.join(image_tags)
+        
         if not include_page_breaks:
             final_text = re.sub(r'\n---\n', '\n', final_text)
 
