@@ -88,6 +88,14 @@ class PDFToMarkdownConverter:
         image_output_dir: Optional[str]
     ) -> str:
         """High-fidelity PDF to Markdown converter with layout & math cleaning."""
+        try:
+            from markitdown import MarkItDown
+            md = MarkItDown()
+            res = md.convert(file_path)
+            md_text = res.text_content
+        except ImportError:
+            md_text = ""
+
         doc = fitz.open(file_path)
         base_name = os.path.splitext(os.path.basename(file_path))[0]
 
@@ -101,90 +109,108 @@ class PDFToMarkdownConverter:
         img_counter = 1
         sup_neg = str.maketrans('0123456789', '⁰¹²³⁴⁵⁶⁷⁸⁹')
 
+        use_fallback = not bool(md_text.strip())
+
         for page_num in range(len(doc)):
             page = doc[page_num]
-            raw_text = page.get_text("text")
-
-            # Skip empty or header-only pages
-            if not raw_text.strip() or len(raw_text.strip()) < 4:
-                continue
-
-            lines = [line.strip() for line in raw_text.split('\n')]
             cleaned_lines = []
 
-            for line in lines:
-                if not line:
-                    if cleaned_lines and cleaned_lines[-1] != '':
-                        cleaned_lines.append('')
+            if use_fallback:
+                raw_text = page.get_text("text")
+                if not raw_text.strip() or len(raw_text.strip()) < 4:
                     continue
 
-                # 1. Clean vector arrow notation (e.g. A  -> $\vec{A}$)
-                line = re.sub(r'([A-Za-z])\s*', r'$\\vec{\1}$', line)
-                line = re.sub(r'\s*([A-Za-z])', r'$\\vec{\1}$', line)
-                line = re.sub(r'^\s*\s*$', '', line)
-                if not line.strip():
-                    continue
+                lines = [line.strip() for line in raw_text.split('\n')]
+                for line in lines:
+                    if not line:
+                        if cleaned_lines and cleaned_lines[-1] != '':
+                            cleaned_lines.append('')
+                        continue
+                    
+                    line = re.sub(r'([A-Za-z])\s*', r'$\\vec{\1}$', line)
+                    line = re.sub(r'\s*([A-Za-z])', r'$\\vec{\1}$', line)
+                    line = re.sub(r'^\s*\s*$', '', line)
+                    if not line.strip(): continue
 
-                # 2. Scientific Notation Exponents (1.6x10-19 -> 1.6 × 10⁻¹⁹)
-                line = re.sub(
-                    r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*[-−–]\s*(\d+)',
-                    lambda m: f'{m.group(1)} × 10⁻' + m.group(2).translate(sup_neg),
-                    line
-                )
-                line = re.sub(
-                    r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*(\d{1,3})\b',
-                    lambda m: f'{m.group(1)} × 10' + m.group(2).translate(sup_neg),
-                    line
-                )
+                    line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*[-−–]\s*(\d+)', lambda m: f'{m.group(1)} × 10⁻' + m.group(2).translate(sup_neg), line)
+                    line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*(\d{1,3})\b', lambda m: f'{m.group(1)} × 10' + m.group(2).translate(sup_neg), line)
+                    line = re.sub(r'([a-zA-Z])2\b', r'\1²', line)
+                    line = re.sub(r'([a-zA-Z])3\b', r'\1³', line)
+                    line = re.sub(r'', r'⇒', line)
+                    line = re.sub(r'', r'•', line)
+                    line = re.sub(r'', r'α', line)
+                    line = re.sub(r'', r'β', line)
+                    line = re.sub(r'', r'Δ', line)
+                    
+                    if len(line) < 60 and line.isupper() and not line.endswith('.'):
+                        if not line.startswith('#'):
+                            line = f"## {line.title()}"
+                            
+                    line = re.sub(r'[ \t]{4,}', '   ', line)
+                    cleaned_lines.append(line)
 
-                # 3. Units & Exponents (m/s2 -> m/s², kg, cm/s2)
-                line = re.sub(r'([a-zA-Z])2\b', r'\1²', line)
-                line = re.sub(r'([a-zA-Z])3\b', r'\1³', line)
-
-                # 4. Math & Greek symbol cleanups
-                line = re.sub(r'', r'⇒', line)
-                line = re.sub(r'', r'•', line)
-                line = re.sub(r'', r'α', line)
-                line = re.sub(r'', r'β', line)
-                line = re.sub(r'', r'Δ', line)
-
-                # 5. Header formatting heuristic for all-caps titles
-                if len(line) < 60 and line.isupper() and not line.endswith('.'):
-                    if not line.startswith('#'):
-                        line = f"## {line.title()}"
-
-                # 6. Reduce interior multi-spaces
-                line = re.sub(r'[ \t]{4,}', '   ', line)
-
-                cleaned_lines.append(line)
-
-            # Extract page images cleanly
+            # Image Extraction with Background Filters
             if extract_images and image_output_dir and os.path.exists(image_output_dir):
                 images_in_page = page.get_images(full=True)
                 for img_info in images_in_page:
                     xref = img_info[0]
                     try:
                         base_img = doc.extract_image(xref)
+                        w = base_img.get('width', 0)
+                        h = base_img.get('height', 0)
+                        
+                        if w < 50 or h < 50: continue
+                        if w > 0 and h > 0:
+                            if w/h > 4.5 or h/w > 4.5: continue
+                        if base_img.get('colorspace') == 1 and base_img.get('bpc') == 1: continue
+
                         img_ext = base_img['ext']
-                        img_name = f'img_p{page_num+1}_{img_counter}.{img_ext}'
+                        img_name = f'{base_name}_img_p{page_num+1}_{img_counter}.{img_ext}'
                         img_path = os.path.join(image_output_dir, img_name)
                         with open(img_path, 'wb') as f:
                             f.write(base_img['image'])
                         
                         rel_img = os.path.join(os.path.basename(image_output_dir), img_name)
-                        cleaned_lines.append(f'\n![Imagen P{page_num+1}]({rel_img})\n')
+                        cleaned_lines.append(f'\n![Imagen P{page_num+1} {img_counter}]({rel_img})\n')
                         img_counter += 1
                     except Exception:
                         pass
 
-            page_md = '\n'.join(cleaned_lines)
-            page_md = re.sub(r'\n{3,}', '\n\n', page_md).strip()
-            if page_md:
-                md_pages.append(page_md)
+            if use_fallback:
+                page_md = '\n'.join(cleaned_lines)
+                page_md = re.sub(r'\n{3,}', '\n\n', page_md).strip()
+                if page_md:
+                    md_pages.append(page_md)
+            elif cleaned_lines:
+                md_pages.append('\n'.join(cleaned_lines))
 
         doc.close()
-        separator = '\n\n---\n\n' if include_page_breaks else '\n\n'
-        return separator.join(md_pages)
+        
+        if not use_fallback:
+            lines = md_text.split('\n')
+            cleaned_md_text = []
+            for line in lines:
+                line = re.sub(r'([A-Za-z])\s*', r'$\\vec{\1}$', line)
+                line = re.sub(r'\s*([A-Za-z])', r'$\\vec{\1}$', line)
+                line = re.sub(r'^\s*\s*$', '', line)
+                line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*[-−–]\s*(\d+)', lambda m: f'{m.group(1)} × 10⁻' + m.group(2).translate(sup_neg), line)
+                line = re.sub(r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*(\d{1,3})\b', lambda m: f'{m.group(1)} × 10' + m.group(2).translate(sup_neg), line)
+                line = re.sub(r'([a-zA-Z])2\b', r'\1²', line)
+                line = re.sub(r'([a-zA-Z])3\b', r'\1³', line)
+                line = re.sub(r'', r'⇒', line)
+                line = re.sub(r'', r'•', line)
+                line = re.sub(r'', r'α', line)
+                line = re.sub(r'', r'β', line)
+                line = re.sub(r'', r'Δ', line)
+                cleaned_md_text.append(line)
+            
+            final_text = '\n'.join(cleaned_md_text)
+            if md_pages:
+                final_text += '\n\n### Imágenes Extraídas\n\n' + '\n'.join(md_pages)
+            return final_text
+        else:
+            separator = '\n\n---\n\n' if include_page_breaks else '\n\n'
+            return separator.join(md_pages)
 
     def _convert_text_file(self, file_path: str, ext: str) -> str:
         """Reads non-PDF files and formats as Markdown."""
