@@ -1,15 +1,16 @@
 """
 Converter Engine Module
-Handles PDF extraction to Markdown (.md), text file formatting, and image preservation.
+Handles PDF extraction to Markdown (.md), text formatting, scientific notation cleanup, and image preservation.
 """
 
 import os
+import re
 from typing import Dict, Any, Tuple, Optional
 import pymupdf as fitz  # PyMuPDF
 
 
 class PDFToMarkdownConverter:
-    """Engine for converting PDF and text files into Markdown format with image extraction."""
+    """Engine for converting PDF and text files into clean, beautiful Markdown with math & image support."""
 
     def __init__(self):
         pass
@@ -56,15 +57,14 @@ class PDFToMarkdownConverter:
         image_output_dir: Optional[str] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """
-        Converts input file (PDF, TXT, etc.) into Markdown string.
-        Optionally extracts embedded images into image_output_dir.
-        Returns (markdown_content, metadata).
+        Converts input file (PDF, TXT, etc.) into clean Markdown string.
+        Extracts embedded images and cleans scientific/mathematical notation.
         """
         info = self.get_file_info(file_path)
         ext = info["extension"]
 
         if ext == ".pdf":
-            md_content = self._convert_pdf(
+            md_content = self._convert_pdf_enhanced(
                 file_path,
                 include_page_breaks=include_page_breaks,
                 extract_images=extract_images,
@@ -80,101 +80,111 @@ class PDFToMarkdownConverter:
 
         return md_content, info
 
-    def _convert_pdf(
+    def _convert_pdf_enhanced(
         self,
         file_path: str,
         include_page_breaks: bool,
         extract_images: bool,
         image_output_dir: Optional[str]
     ) -> str:
-        """Converts PDF file to Markdown with image extraction support."""
-        try:
-            import pymupdf4llm
-            kwargs = {
-                "page_chunks": True,
-                "write_images": extract_images,
-            }
-            if extract_images and image_output_dir:
-                os.makedirs(image_output_dir, exist_ok=True)
-                kwargs["image_path"] = image_output_dir
-
-            page_chunks = pymupdf4llm.to_markdown(file_path, **kwargs)
-            
-            md_pages = []
-            for chunk in page_chunks:
-                text = chunk.get("text", "").strip()
-                if text:
-                    md_pages.append(text)
-
-            separator = "\n\n---\n\n" if include_page_breaks else "\n\n"
-            return separator.join(md_pages)
-        except Exception as e:
-            # Fallback method
-            return self._convert_pdf_fallback(file_path, include_page_breaks, extract_images, image_output_dir)
-
-    def _convert_pdf_fallback(
-        self,
-        file_path: str,
-        include_page_breaks: bool,
-        extract_images: bool,
-        image_output_dir: Optional[str]
-    ) -> str:
-        """Fallback method parsing PDF text & images directly with PyMuPDF."""
+        """High-fidelity PDF to Markdown converter with layout & math cleaning."""
         doc = fitz.open(file_path)
-        pages_md = []
-        img_counter = 1
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
 
         if extract_images and image_output_dir:
-            os.makedirs(image_output_dir, exist_ok=True)
+            try:
+                os.makedirs(image_output_dir, exist_ok=True)
+            except Exception:
+                extract_images = False
+
+        md_pages = []
+        img_counter = 1
+        sup_neg = str.maketrans('0123456789', '⁰¹²³⁴⁵⁶⁷⁸⁹')
 
         for page_num in range(len(doc)):
             page = doc[page_num]
-            blocks = page.get_text("blocks")
-            page_lines = []
+            raw_text = page.get_text("text")
 
-            for b in blocks:
-                text = b[4].strip()
-                if not text:
+            # Skip empty or header-only pages
+            if not raw_text.strip() or len(raw_text.strip()) < 4:
+                continue
+
+            lines = [line.strip() for line in raw_text.split('\n')]
+            cleaned_lines = []
+
+            for line in lines:
+                if not line:
+                    if cleaned_lines and cleaned_lines[-1] != '':
+                        cleaned_lines.append('')
                     continue
 
-                lines = text.split("\n")
-                first_line = lines[0].strip()
-                
-                if len(first_line) < 60 and not first_line.endswith("."):
-                    if page_num == 0 and len(page_lines) == 0:
-                        page_lines.append(f"# {first_line}")
-                        if len(lines) > 1:
-                            page_lines.append("\n".join(lines[1:]))
-                        continue
+                # 1. Clean vector arrow notation (e.g. A  -> $\vec{A}$)
+                line = re.sub(r'([A-Za-z])\s*', r'$\\vec{\1}$', line)
+                line = re.sub(r'\s*([A-Za-z])', r'$\\vec{\1}$', line)
+                line = re.sub(r'^\s*\s*$', '', line)
+                if not line.strip():
+                    continue
 
-                page_lines.append(text)
+                # 2. Scientific Notation Exponents (1.6x10-19 -> 1.6 × 10⁻¹⁹)
+                line = re.sub(
+                    r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*[-−–]\s*(\d+)',
+                    lambda m: f'{m.group(1)} × 10⁻' + m.group(2).translate(sup_neg),
+                    line
+                )
+                line = re.sub(
+                    r'(\d+(?:[.,]\d+)?)\s*[xX*×]\s*10\s*(\d{1,3})\b',
+                    lambda m: f'{m.group(1)} × 10' + m.group(2).translate(sup_neg),
+                    line
+                )
 
-            # Extract page images if enabled
-            if extract_images and image_output_dir:
+                # 3. Units & Exponents (m/s2 -> m/s², kg, cm/s2)
+                line = re.sub(r'([a-zA-Z])2\b', r'\1²', line)
+                line = re.sub(r'([a-zA-Z])3\b', r'\1³', line)
+
+                # 4. Math & Greek symbol cleanups
+                line = re.sub(r'', r'⇒', line)
+                line = re.sub(r'', r'•', line)
+                line = re.sub(r'', r'α', line)
+                line = re.sub(r'', r'β', line)
+                line = re.sub(r'', r'Δ', line)
+
+                # 5. Header formatting heuristic for all-caps titles
+                if len(line) < 60 and line.isupper() and not line.endswith('.'):
+                    if not line.startswith('#'):
+                        line = f"## {line.title()}"
+
+                # 6. Reduce interior multi-spaces
+                line = re.sub(r'[ \t]{4,}', '   ', line)
+
+                cleaned_lines.append(line)
+
+            # Extract page images cleanly
+            if extract_images and image_output_dir and os.path.exists(image_output_dir):
                 images_in_page = page.get_images(full=True)
                 for img_info in images_in_page:
                     xref = img_info[0]
                     try:
-                        base_image = doc.extract_image(xref)
-                        image_bytes = base_image["image"]
-                        image_ext = base_image["ext"]
-                        img_filename = f"image_p{page_num+1}_{img_counter}.{image_ext}"
-                        img_save_path = os.path.join(image_output_dir, img_filename)
+                        base_img = doc.extract_image(xref)
+                        img_ext = base_img['ext']
+                        img_name = f'img_p{page_num+1}_{img_counter}.{img_ext}'
+                        img_path = os.path.join(image_output_dir, img_name)
+                        with open(img_path, 'wb') as f:
+                            f.write(base_img['image'])
                         
-                        with open(img_save_path, "wb") as f_img:
-                            f_img.write(image_bytes)
-
-                        rel_path = os.path.relpath(img_save_path, start=os.path.dirname(image_output_dir))
-                        page_lines.append(f"\n![Imagen P{page_num+1}]({rel_path})\n")
+                        rel_img = os.path.join(os.path.basename(image_output_dir), img_name)
+                        cleaned_lines.append(f'\n![Imagen P{page_num+1}]({rel_img})\n')
                         img_counter += 1
                     except Exception:
                         pass
 
-            pages_md.append("\n\n".join(page_lines))
+            page_md = '\n'.join(cleaned_lines)
+            page_md = re.sub(r'\n{3,}', '\n\n', page_md).strip()
+            if page_md:
+                md_pages.append(page_md)
 
         doc.close()
-        separator = "\n\n---\n\n" if include_page_breaks else "\n\n"
-        return separator.join(pages_md)
+        separator = '\n\n---\n\n' if include_page_breaks else '\n\n'
+        return separator.join(md_pages)
 
     def _convert_text_file(self, file_path: str, ext: str) -> str:
         """Reads non-PDF files and formats as Markdown."""
@@ -196,9 +206,9 @@ class PDFToMarkdownConverter:
         return f"# {filename}\n\n{content}"
 
     def _clean_newlines(self, text: str) -> str:
-        """Normalizes multiple consecutive newlines."""
-        import re
-        return re.sub(r"\n{3,}", "\n\n", text).strip()
+        """Normalizes multiple consecutive newlines and extra spaces."""
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
