@@ -564,6 +564,11 @@ class MainWindow(QMainWindow):
         self.btn_clear = QPushButton("🗑️ Limpiar")
         self.btn_clear.clicked.connect(self.clear_all)
 
+        self.btn_back_to_list = QPushButton("⬅️ Volver al Listado")
+        self.btn_back_to_list.clicked.connect(self.return_to_batch_list)
+        self.btn_back_to_list.setVisible(False)
+
+        control_layout.addWidget(self.btn_back_to_list)
         control_layout.addWidget(self.btn_select)
         control_layout.addWidget(self.btn_open_md)
         control_layout.addWidget(self.btn_convert)
@@ -618,7 +623,7 @@ class MainWindow(QMainWindow):
         batch_layout = QVBoxLayout(self.batch_table_widget)
         batch_layout.setContentsMargins(0, 0, 0, 0)
 
-        lbl_batch_header = QLabel("📚 Listado de Archivos para Conversión en Lote:")
+        lbl_batch_header = QLabel("📚 Listado de Archivos (Haz doble clic en cualquier fila para ver/editar):")
         lbl_batch_header.setStyleSheet("font-weight: 600; font-size: 14px; color: #CBD5E1;")
 
         self.table = QTableWidget()
@@ -629,7 +634,9 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.itemDoubleClicked.connect(self.on_table_item_double_clicked)
 
         batch_layout.addWidget(lbl_batch_header)
         batch_layout.addWidget(self.table)
@@ -724,6 +731,60 @@ class MainWindow(QMainWindow):
                 self.table.setItem(i, 4, QTableWidgetItem(os.path.dirname(fpath)))
 
             self.status_bar.showMessage(f"Modo Lote: {len(files)} archivos cargados en la lista. Haz clic en 'Convertir ({len(files)} Archivos)'")
+
+    def on_table_item_double_clicked(self, item: QTableWidgetItem):
+        """Switches to Single View Editor when user double clicks any file row in batch table."""
+        row = item.row()
+        if 0 <= row < len(self.selected_files):
+            file_path = self.selected_files[row]
+            self.view_stack.setCurrentIndex(0)
+            self.btn_back_to_list.setVisible(True)
+            self.btn_copy.setVisible(True)
+            self.btn_save.setVisible(True)
+
+            out_item = self.table.item(row, 4)
+            out_path = out_item.text() if out_item else ""
+
+            if out_path and os.path.isfile(out_path):
+                target_md = out_path
+            elif file_path.lower().endswith((".md", ".txt", ".json", ".py", ".html")):
+                target_md = file_path
+            else:
+                target_md = ""
+
+            if target_md and os.path.exists(target_md):
+                try:
+                    with open(target_md, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    self.current_markdown = content
+                    self.text_editor.blockSignals(True)
+                    self.text_editor.setPlainText(content)
+                    self.text_editor.blockSignals(False)
+                    self.render_html_preview(content)
+                    self.btn_copy.setEnabled(True)
+                    self.btn_save.setEnabled(True)
+                    self.status_bar.showMessage(f"👁️ Viendo/Editando [{row+1}/{len(self.selected_files)}]: {os.path.basename(file_path)}")
+                    return
+                except Exception:
+                    pass
+
+            self.status_bar.showMessage(f"Cargando y convirtiendo [{row+1}/{len(self.selected_files)}]: {os.path.basename(file_path)}...")
+            self.single_worker = SingleConversionWorker(
+                file_path,
+                include_page_breaks=self.chk_page_breaks.isChecked(),
+                extract_images=self.chk_extract_images.isChecked()
+            )
+            self.single_worker.finished_signal.connect(self.on_single_success)
+            self.single_worker.error_signal.connect(self.on_single_error)
+            self.single_worker.start()
+
+    def return_to_batch_list(self):
+        """Returns to the Batch Table View."""
+        self.view_stack.setCurrentIndex(1)
+        self.btn_back_to_list.setVisible(False)
+        self.btn_copy.setVisible(False)
+        self.btn_save.setVisible(False)
+        self.status_bar.showMessage(f"Modo Lote: {len(self.selected_files)} archivos cargados en el listado.")
 
     def start_conversion(self):
         if not self.selected_files:
