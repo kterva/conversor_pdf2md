@@ -77,3 +77,7 @@ conversor_pdf2md/
 ## 📄 Licencia
 
 MIT License.
+
+## Licencia
+
+Software libre bajo la **Licencia Pública General GNU, versión 3 o posterior** (GPL-3.0-or-later). Ver [LICENSE](LICENSE). Las bibliotecas y datos de terceros incluidos conservan su propia licencia.
